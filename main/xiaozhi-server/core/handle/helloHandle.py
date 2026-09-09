@@ -66,6 +66,12 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
     if isinstance(voice, dict) and voice:
         conn.client_voice = voice
         conn.logger.bind(tag=TAG).info(f"客户端指定音色: {voice}")
+        # TTS 在后台线程异步初始化（ConnectionHandler._background_initialize），
+        # 可能先于 hello 消息完成 → 此时 client_voice 尚未设置，_initialize_tts
+        # 不会注入覆盖。所以这里补充：若 TTS 已就绪则立即注入，否则等
+        # _initialize_tts 读取 conn.client_voice。
+        if conn.tts is not None and hasattr(conn.tts, "set_client_voice"):
+            conn.tts.set_client_voice(voice)
 
     await conn.websocket.send(json.dumps(conn.welcome_msg))
 
