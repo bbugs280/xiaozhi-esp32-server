@@ -60,6 +60,13 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
             conn.logger.bind(tag=TAG).debug("客户端启用了服务端AEC")
             conn.client_aec = True
 
+    # 客户端音色覆盖：hello 消息可携带 {"yue": ..., "en": ...} 指定本连接的
+    # Edge-TTS 音色，优先于 data/.config.yaml 的默认值。
+    voice = msg_json.get("voice")
+    if isinstance(voice, dict) and voice:
+        conn.client_voice = voice
+        conn.logger.bind(tag=TAG).info(f"客户端指定音色: {voice}")
+
     await conn.websocket.send(json.dumps(conn.welcome_msg))
 
 

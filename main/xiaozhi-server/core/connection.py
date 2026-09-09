@@ -38,6 +38,44 @@ from plugins_func.loadplugins import auto_import_modules
 from plugins_func.register import Action, ActionResponse, all_function_registry, module_func_map
 from core.auth import AuthenticationError
 from config.config_loader import get_private_config_from_api
+
+
+# ── Language detection (mirrors Butler hermes_voice.py detect_language) ──
+# Deterministic CJK check on the ASR text — NOT relying on the LLM to
+# self-detect. Cantonese/Chinese = any Han char; else English.
+_YUE_INSTRUCTION = (
+    "（請用純正口語化粵語回答，唔好用書面語或普通話。用香港人日常語氣："
+    "講「老細」唔講「老闆」、「喺度」唔講「在」、「冇」唔講「沒有」、「呢個」唔講「這個」。"
+    "一句到兩句，簡短自然。）"
+)
+
+
+def _detect_cantonese(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
+def _detect_language(text: str) -> str:
+    """'en' | 'yue' — same convention as Butler detect_language()."""
+    if not text or not text.strip():
+        return "en"
+    if _detect_cantonese(text):
+        return "yue"
+    return "en"
+
+
+def _lang_instruction(lang: str) -> str:
+    """Prepend a target-language imperative (Butler lines 518-522).
+
+    Unlike Butler (whose empty en/'' works because its requests are stateless),
+    ai-where's xiaozhi server carries a FULL multi-turn dialogue into the LLM.
+    Once Cantonese turns enter history, deepseek-v4-flash keeps answering in
+    Cantonese even for a later English question. So English needs an explicit
+    POSITIVE counter-instruction to override the history drift.
+    """
+    if lang == "yue":
+        return _YUE_INSTRUCTION
+    return "（Please reply in English only. Do not use Chinese or Cantonese. ）"
+
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, create_connection_logger
 from config.manage_api_client import DeviceNotFoundException, DeviceBindException, generate_and_save_chat_title
@@ -169,6 +207,9 @@ class ConnectionHandler:
         self.sentence_id = None
         # 处理TTS响应没有文本返回
         self.tts_MessageText = ""
+        # 客户端通过 hello 消息指定的音色覆盖（dict {yue, en} 或 None）。
+        # None = 使用服务器 data/.config.yaml 的默认音色。
+        self.client_voice: dict | None = None
 
         # iot相关变量
         self.iot_descriptors = {}
@@ -749,6 +790,11 @@ class ConnectionHandler:
         if tts is None:
             tts = DefaultTTS(self.config, delete_audio_file=True)
 
+        # 客户端通过 hello 消息指定了音色覆盖（{"yue": ..., "en": ...}），
+        # 注入到每个连接独立的 TTS 实例，优先于 data/.config.yaml 的默认值。
+        if self.client_voice and hasattr(tts, "set_client_voice"):
+            tts.set_client_voice(self.client_voice)
+
         return tts
 
     def _initialize_asr(self):
@@ -773,7 +819,14 @@ class ConnectionHandler:
         try:
             voiceprint_config = self.config.get("voiceprint", {})
             if voiceprint_config:
-                voiceprint_provider = VoiceprintProvider(voiceprint_config)
+                vp_type = voiceprint_config.get("type", "")
+                if vp_type == "local_ecapa":
+                    from core.utils.local_ecapa_voiceprint import (
+                        LocalEcapaVoiceprintProvider,
+                    )
+                    voiceprint_provider = LocalEcapaVoiceprintProvider(voiceprint_config)
+                else:
+                    voiceprint_provider = VoiceprintProvider(voiceprint_config)
                 if voiceprint_provider is not None and voiceprint_provider.enabled:
                     self.voiceprint_provider = voiceprint_provider
                     self.logger.bind(tag=TAG).info("声纹识别功能已在连接时动态启用")
@@ -1052,6 +1105,18 @@ class ConnectionHandler:
     def chat(self, query, depth=0):
         # 保存当前任务的sentence_id到局部变量，避免被新任务覆盖
         current_sentence_id = None
+
+        # Deterministic language detection (mirrors Butler): prepend a
+        # target-language imperative so the model replies in the question's
+        # language. Cantonese gets the colloquial-口語 instruction; English
+        # gets nothing (default). This is done at depth==0 only — the top
+        # user turn — so tool-call recursion preserves the raw query.
+        if query is not None and depth == 0:
+            lang = _detect_language(query)
+            inst = _lang_instruction(lang)
+            if inst:
+                query = f"{inst} {query}"
+                self.logger.bind(tag=TAG).info(f"语言检测: {lang}，已附加语言指令")
 
         if query is not None:
             self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
