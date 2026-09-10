@@ -20,6 +20,27 @@ from core.utils.util import remove_punctuation_and_length
 from core.handle.receiveAudioHandle import handleAudioMessage
 from typing import Optional, Tuple, List, NamedTuple, TYPE_CHECKING
 
+# Simplified→Traditional (HK) converter applied to ALL ASR output. The local
+# SenseVoice model (and most cloud ASR) emits Simplified Chinese, but the
+# household reads Traditional — so every transcript passes through this choke
+# point before it reaches the client. `s2hk` also handles HK-variant phrases
+# (裏面 not 裡面, 軟件 not 软件, 點解 not 点解).
+from opencc import OpenCC
+
+_OPENCC_S2HK = OpenCC("s2hk")
+
+
+def _to_traditional(text: str) -> str:
+    """Convert an ASR transcript to Traditional Chinese (HK). No-op for
+    already-Traditional or non-Chinese text."""
+    if not text:
+        return text
+    try:
+        return _OPENCC_S2HK.convert(text)
+    except Exception:
+        # Never let a converter failure drop a transcript.
+        return text
+
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
@@ -298,6 +319,9 @@ class ASRProviderBase(ABC):
             text, _ = await self.speech_to_text(
                 pcm_data, session_id, artifacts
             )
+            # Convert Simplified→Traditional (HK) so the on-screen transcript
+            # matches the reply script. Covers all providers uniformly.
+            text = _to_traditional(text) if text else text
             return text, file_path
         except OSError as e:
             logger.bind(tag=TAG).error(f"文件操作错误: {e}")
