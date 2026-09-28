@@ -113,5 +113,5 @@ def is_emoji(char):
 
 
 def check_emoji(text):
-    """去除文本中的所有emoji表情"""
-    return "".join(char for char in text if not is_emoji(char) and char != "\n")
+    """去除文本中的所有emoji表情（保留换行符，用于屏幕显示时的分段结构）"""
+    return "".join(char for char in text if not is_emoji(char))

@@ -47,5 +47,14 @@ def test_check_emoji_removes_emoji_keeps_text():
     assert check_emoji("hi 😀 there") == "hi  there"
 
 
-def test_check_emoji_removes_newlines():
-    assert check_emoji("a\nb") == "ab"
+def test_check_emoji_preserves_newlines():
+    # check_emoji's job is to strip EMOJI, not newlines. A reply formatted with
+    # markdown paragraphs/bullets ("**Day 18**\n- Rung one\n- Rung two") must keep
+    # its newlines so the client's markdown renderer can show the structure.
+    # (Regression: the old impl did `char != "\n"`, silently flattening every
+    # multi-line reply into one run-on sentence on screen.)
+    assert check_emoji("a\nb") == "a\nb"
+
+
+def test_check_emoji_strips_emoji_and_keeps_newlines():
+    assert check_emoji("**Day 18**\n- Rung one 😀\n- Rung two") == "**Day 18**\n- Rung one \n- Rung two"
