@@ -94,8 +94,37 @@ async def startToChat(conn: "ConnectionHandler", text):
         # 如果意图已被处理，不再进行聊天
         return
 
+    # ⚠️ The abort may have landed during the awaits above (handle_user_intent
+    # awaits an LLM call). If the user barged in / tapped STOP while this ASR
+    # result was still being routed to the intent layer, the turn is cancelled —
+    # do NOT answer it. Without this guard the code below resets client_abort
+    # and the interrupted utterance is answered as a fresh "next round" (the
+    # "queued interrupted message" bug).
+    if conn.client_abort:
+        conn.logger.bind(tag=TAG).info(
+            "startToChat: client_abort set during intent routing — dropping the turn"
+        )
+        # ⚠️ Do NOT leave client_abort latched True: the flag is the ONLY thing
+        # keeping the drop correct, but a leaked True would then falsely drop
+        # the user's NEXT genuine utterance (nothing else on the normal
+        # nointent/function_call path resets it). Clear it on the way out so
+        # this turn is dropped exactly once and the next turns are unaffected.
+        conn.client_abort = False
+        return
+
     # 意图未被处理，继续常规聊天流程，使用实际文本内容
     await send_stt_message(conn, actual_text)
+
+    # Re-check: an abort may have landed during send_stt_message's own await
+    # (websocket.send). This closes the residual window build-tester flagged —
+    # otherwise the abort is wiped by the reset below and the turn is still
+    # answered. Drop here, exactly like the pre-stt guard.
+    if conn.client_abort:
+        conn.logger.bind(tag=TAG).info(
+            "startToChat: client_abort set during stt send — dropping the turn"
+        )
+        conn.client_abort = False
+        return
 
     # 准备开始新会话
     conn.client_abort = False
