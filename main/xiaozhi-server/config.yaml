@@ -607,7 +607,7 @@ VAD:
     threshold: 0.5
     threshold_low: 0.3
     model_dir: models/snakers4_silero-vad
-    min_silence_duration_ms: 200  # 如果说话停顿比较长，可以把这个值设置大一些
+    min_silence_duration_ms: 800  # 如果说话停顿比较长，可以把这个值设置大一些。200ms 会把句中换气当成说完一句（长句被切成多段），800ms 是正常对话取值
 
 LLM:
   # 所有openai类型均可以修改超参，以AliLLM为例
