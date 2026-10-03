@@ -299,14 +299,23 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
         # 等待所有音频包发送完成
         await _wait_for_audio_completion(conn)
 
-        # 检查是否是当前轮次
+        # ⚠️ clearSpeakStatus() (client_is_speaking = False) must run
+        # UNCONDITIONALLY on stop. The sentence_id guard below is for the RATE
+        # CONTROLLER only — a stale stop must not clobber a NEWER turn's
+        # in-flight audio queue. But the speaking flag is safe (and REQUIRED) to
+        # clear regardless: if it stays latched True, the next genuine utterance
+        # hits startToChat's `if client_is_speaking: handleAbortMessage(conn)`
+        # and SELF-ABORTS — the user's turn is dropped and they sit in
+        # "Thinking…" with no reply (the 2026-10-03 bug).
+        conn.clearSpeakStatus()
+
+        # 检查是否是当前轮次 —— 只为音频流控器，不为 client_is_speaking
         if current_sentence_id != conn.sentence_id:
             return
 
         # 停止音频发送循环（仅在流控器已初始化时调用）
         if hasattr(conn, "audio_rate_controller") and conn.audio_rate_controller:
             conn.audio_rate_controller.stop_sending()
-        conn.clearSpeakStatus()
 
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))
