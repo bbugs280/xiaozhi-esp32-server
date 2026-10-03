@@ -35,6 +35,17 @@ class ListenTextMessageHandler(TextMessageHandler):
         if msg_json["state"] == "start":
             # 设备从播放模式切回录音模式,清除所有音频状态和缓冲区
             conn.reset_audio_states()
+            # ⚠️ Clear the abort flag too. An earlier STOP/barge-in set
+            # client_abort=True, and reset_audio_states() only clears audio/VAD
+            # state — the flag itself stays latched True into THIS turn. That
+            # makes the next spoken utterance hit the `startToChat` guard
+            # ("client_abort set during intent routing — dropping the turn") and
+            # be silently discarded — the user's "after I stop to interrupt it
+            # takes a while to resume" bug (the first re-speak is dropped, so
+            # they must speak twice). A fresh `listen start` is exactly the
+            # boundary where a new turn begins, so this is where the flag must
+            # reset.
+            conn.client_abort = False
         elif msg_json["state"] == "stop":
             # 收到stop但asr未初始化，跳过处理
             if conn.asr is None:
