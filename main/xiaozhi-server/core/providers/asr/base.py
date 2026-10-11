@@ -17,6 +17,7 @@ from core.providers.asr.dto.dto import InterfaceType
 from core.handle.receiveAudioHandle import startToChat
 from core.handle.reportHandle import enqueue_asr_report
 from core.utils.util import remove_punctuation_and_length
+from core.utils.utterance_completeness import is_utterance_complete
 from core.handle.receiveAudioHandle import handleAudioMessage
 from typing import Optional, Tuple, List, NamedTuple, TYPE_CHECKING
 
@@ -187,8 +188,34 @@ class ASRProviderBase(ABC):
             if text_len > 0:
                 audio_snapshot = asr_audio_task.copy()
                 enqueue_asr_report(conn, enhanced_text, audio_snapshot)
+
+                # ── Utterance completeness gate ────────────────────────────
+                # The VAD closes a turn on *silence*, but a thinking pause is
+                # physically identical to finishing a sentence. Upstream the
+                # LLM was therefore fired on every VAD boundary, answering
+                # half-sentences — the "breaks my questions into batches"
+                # symptom (server.log 2026-10-11 11:18-11:20: one thought ->
+                # three `识别文本` -> three full answers).
+                #
+                # Hold an incomplete fragment and merge it with the next one,
+                # so the LLM sees the finished thought ONCE. Fail-open: any
+                # judge failure resolves to complete, i.e. today's behaviour.
+                pending = getattr(conn, "_pending_utterance", None)
+                candidate = f"{pending}{enhanced_text}" if pending else enhanced_text
+
+                if not await is_utterance_complete(
+                    conn, content_for_length_check or ""
+                ):
+                    conn._pending_utterance = candidate
+                    logger.bind(tag=TAG).info(
+                        f"utterance incomplete -> holding: {content_for_length_check}"
+                    )
+                    return
+
+                # Complete: answer the merged text, and clear the hold.
+                conn._pending_utterance = None
                 # 使用自定义模块进行上报
-                await startToChat(conn, enhanced_text)
+                await startToChat(conn, candidate)
         except Exception as e:
             logger.bind(tag=TAG).error(f"处理语音停止失败: {e}")
             import traceback

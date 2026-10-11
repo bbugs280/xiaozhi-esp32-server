@@ -154,6 +154,10 @@ class ConnectionHandler:
         self.client_abort = False
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
+        # Incomplete ASR fragment held by the utterance-completeness gate,
+        # waiting to be merged with the next fragment of the same thought.
+        # None = nothing held. See core/utils/utterance_completeness.py.
+        self._pending_utterance = None
         self.client_aec = False  # 是否启用了服务端AEC
 
         # 线程任务相关
@@ -1765,6 +1769,13 @@ class ConnectionHandler:
 
         # Clear ASR buffers
         self.asr_audio.clear()
+
+        # Drop any incomplete fragment held by the completeness gate. A reset
+        # marks a turn boundary (abort / listen start), so a held half-sentence
+        # from the previous turn must NOT survive to be merged into the next
+        # one — that would resurrect the "interrupted message answered next
+        # round" class of bug in a new form.
+        self._pending_utterance = None
 
         self.logger.bind(tag=TAG).debug("All audio states reset.")
 
