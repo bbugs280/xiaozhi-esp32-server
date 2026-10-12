@@ -20,7 +20,7 @@ from core.utils.util import (
     check_asr_update,
     filter_sensitive_info,
 )
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from collections import deque
 from core.utils.modules_initialize import (
     initialize_modules,
@@ -156,8 +156,14 @@ class ConnectionHandler:
         self.client_listen_mode = "auto"
         # Incomplete ASR fragment held by the utterance-completeness gate,
         # waiting to be merged with the next fragment of the same thought.
-        # None = nothing held. See core/utils/utterance_completeness.py.
-        self._pending_utterance = None
+        # None = nothing held; otherwise the accumulated RAW text.
+        # See core/utils/utterance_completeness.py.
+        self._pending_utterance: Optional[str] = None
+        # Speaker identified for the held fragment(s). Kept alongside the text
+        # so the flush path (listen stop / abort) can re-wrap the merged
+        # utterance in the same JSON shape a normal turn carries — otherwise
+        # the flushed turn silently loses its speaker attribution.
+        self._pending_utterance_speaker: Optional[str] = None
         self.client_aec = False  # 是否启用了服务端AEC
 
         # 线程任务相关
@@ -1775,9 +1781,66 @@ class ConnectionHandler:
         # from the previous turn must NOT survive to be merged into the next
         # one — that would resurrect the "interrupted message answered next
         # round" class of bug in a new form.
+        #
+        # ⚠️ But "drop" must not mean "silently vanish". A fragment is only held
+        # because it looked incomplete; if the user then stops (or aborts), that
+        # text is all we will ever get. `take_pending_utterance()` hands it to
+        # the caller to be answered/flushed BEFORE this reset discards it —
+        # otherwise the user speaks, is acknowledged by VAD, and never gets a
+        # reply (the "held forever" defect).
         self._pending_utterance = None
+        self._pending_utterance_speaker = None
 
         self.logger.bind(tag=TAG).debug("All audio states reset.")
+
+    def take_pending_utterance(self):
+        """Return and clear the gate's held fragment — AND its speaker.
+
+        The text and the speaker are one unit (attribution belongs to the
+        utterance), so clearing one without the other could hand a later
+        fragment a stale speaker. This used to clear the text only, which made
+        it a foot-gun for any turn-boundary caller; `flush_pending_utterance()`
+        is the intended entry point and pairs the two correctly.
+
+        ⚠️ Returns the *raw* accumulated text. Do NOT pass it to `startToChat`
+        as-is — use `flush_pending_utterance()`, which re-wraps it (voiceprint
+        JSON when a speaker was identified) so it reaches the LLM in the same
+        shape as a normal turn. Raw text silently drops speaker attribution.
+        """
+        held = getattr(self, "_pending_utterance", None)
+        self._pending_utterance = None
+        self._pending_utterance_speaker = None
+        return held
+
+    def take_pending_utterance_speaker(self):
+        """Return and clear the speaker identified for the held fragment."""
+        speaker = getattr(self, "_pending_utterance_speaker", None)
+        self._pending_utterance_speaker = None
+        return speaker
+
+    def flush_pending_utterance(self) -> Optional[str]:
+        """Pop the held fragment AND re-wrap it the way the ASR gate would.
+
+        Returns the payload ready for `startToChat` (voiceprint JSON when a
+        speaker was identified, bare text otherwise), or None if nothing was
+        held. This is the ONLY correct way to answer a held fragment — passing
+        the raw text to `startToChat` drops the speaker attribution, and
+        passing an already-wrapped payload double-wraps it.
+        """
+        import json as _json
+
+        # ⚠️ Read the speaker BEFORE taking the text: `take_pending_utterance()`
+        # clears both (they are one unit), so reading it afterwards always
+        # yielded None and silently dropped attribution.
+        speaker = getattr(self, "_pending_utterance_speaker", None)
+        held = self.take_pending_utterance()
+        if not held:
+            return None
+        if isinstance(speaker, str) and speaker.strip():
+            return _json.dumps(
+                {"speaker": speaker, "content": held}, ensure_ascii=False
+            )
+        return held
 
     def chat_and_close(self, text):
         """Chat with the user and then close the connection"""

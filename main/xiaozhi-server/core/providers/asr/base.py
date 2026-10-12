@@ -200,20 +200,39 @@ class ASRProviderBase(ABC):
                 # Hold an incomplete fragment and merge it with the next one,
                 # so the LLM sees the finished thought ONCE. Fail-open: any
                 # judge failure resolves to complete, i.e. today's behaviour.
-                pending = getattr(conn, "_pending_utterance", None)
-                candidate = f"{pending}{enhanced_text}" if pending else enhanced_text
+                #
+                # ⚠️ Merge RAW text, re-wrap once. `enhanced_text` is the
+                # voiceprint JSON form when voiceprint is active (it is, in
+                # prod: local_ecapa), so concatenating two wrapped payloads
+                # produces `{...}{...}` — invalid JSON that leaks literal
+                # braces into the LLM prompt, the TTS and the transcript.
+                raw_text = content_for_length_check or self._unwrap_content(
+                    enhanced_text
+                )
+                pending_raw = getattr(conn, "_pending_utterance", None)
+                merged_raw = f"{pending_raw}{raw_text}" if pending_raw else raw_text
 
-                if not await is_utterance_complete(
-                    conn, content_for_length_check or ""
-                ):
-                    conn._pending_utterance = candidate
+                # `speaker_name` is "" on voiceprint failure and may be an
+                # exception object on some adapters — never let it leak through.
+                safe_speaker = speaker_name if isinstance(speaker_name, str) else None
+
+                if not await is_utterance_complete(conn, raw_text):
+                    conn._pending_utterance = merged_raw
+                    # Remember WHO said it, so a later flush (listen stop /
+                    # abort) can re-wrap the merged text in the same shape a
+                    # normal turn carries. Without this the flushed turn loses
+                    # its speaker attribution.
+                    if safe_speaker and safe_speaker.strip():
+                        conn._pending_utterance_speaker = safe_speaker
                     logger.bind(tag=TAG).info(
-                        f"utterance incomplete -> holding: {content_for_length_check}"
+                        f"utterance incomplete -> holding: {raw_text}"
                     )
                     return
 
-                # Complete: answer the merged text, and clear the hold.
+                # Complete: answer the merged thought, and clear the hold.
                 conn._pending_utterance = None
+                conn._pending_utterance_speaker = None
+                candidate = self._wrap_content(merged_raw, safe_speaker)
                 # 使用自定义模块进行上报
                 await startToChat(conn, candidate)
         except Exception as e:
@@ -230,6 +249,32 @@ class ASRProviderBase(ABC):
             )
         else:
             return text
+
+    def _unwrap_content(self, enhanced_text: Optional[str]) -> str:
+        """Recover the raw utterance from `enhanced_text`.
+
+        `enhanced_text` is the voiceprint-wrapped JSON form
+        (`{"speaker": ..., "content": ...}`) whenever voiceprint is active, and
+        the bare string otherwise. The completeness gate must merge RAW text and
+        re-wrap exactly once — concatenating two wrapped payloads yields
+        `{...}{...}` which is not valid JSON and leaks the literal braces into
+        the LLM prompt, the TTS output and the on-screen transcript.
+        """
+        if not enhanced_text:
+            return ""
+        stripped = enhanced_text.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                payload = json.loads(stripped)
+                if isinstance(payload, dict) and "content" in payload:
+                    return str(payload.get("content") or "")
+            except (ValueError, TypeError):
+                pass
+        return enhanced_text
+
+    def _wrap_content(self, raw_text: str, speaker_name: Optional[str]) -> str:
+        """Re-wrap a merged raw utterance for `startToChat`."""
+        return self._build_enhanced_text(raw_text, speaker_name)
 
     def _pcm_to_wav(self, pcm_data: bytes) -> bytes:
         """将PCM数据转换为WAV格式"""

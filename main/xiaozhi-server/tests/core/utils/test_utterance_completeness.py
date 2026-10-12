@@ -189,3 +189,29 @@ def test_empty_text_is_complete():
 
     assert asyncio.run(uc.is_utterance_complete(conn, "")) is True
     assert asyncio.run(uc.is_utterance_complete(conn, "   ")) is True
+
+
+def test_hanging_judge_times_out_and_fails_open():
+    """⚠️ A HANG must fail open too, and must not block forever.
+
+    The fail-open contract covers a stalled endpoint, not just an error: a
+    judge that never returns would otherwise wedge the ASR turn indefinitely
+    and the user would never be answered. `asyncio.wait_for` bounds it.
+    """
+    import time
+
+    class _HangingLLM:
+        async def response(self, messages):
+            await asyncio.sleep(3600)  # never returns
+
+    conn = _StubConn(llm=_HangingLLM())
+
+    started = time.monotonic()
+    verdict = asyncio.run(uc.is_utterance_complete(conn, "空炮"))
+    elapsed = time.monotonic() - started
+
+    assert verdict is True, "a hung judge must fail OPEN (answer the turn)"
+    assert elapsed < uc._JUDGE_TIMEOUT_S + 2.0, (
+        f"the judge was not bounded — took {elapsed:.1f}s "
+        f"(timeout is {uc._JUDGE_TIMEOUT_S}s)"
+    )

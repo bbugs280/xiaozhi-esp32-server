@@ -108,14 +108,17 @@ def _parse_complete(raw: str) -> Optional[bool]:
     return None
 
 
+_JUDGE_TIMEOUT_S = 8.0
+
+
 async def judge_completeness_llm(conn, text: str) -> Optional[bool]:
     """Tier 2: ask the LLM whether `text` is a finished thought.
 
-    Returns True/False, or None when the judge could not be reached/parsed
-    (callers must treat None as "complete" — fail open, preserve today's
-    behaviour rather than wedging the turn).
+    Returns True/False, or None when the judge could not be reached/parsed/
+    timed out (callers must treat None as "complete" — fail open, preserve
+    today's behaviour rather than wedging the turn).
     """
-    import json
+    import asyncio
 
     llm = getattr(conn, "llm", None)
     if llm is None:
@@ -130,7 +133,10 @@ async def judge_completeness_llm(conn, text: str) -> Optional[bool]:
         # signature varies by provider, so reach for the narrowest common form.
         result = llm.response(messages)
         if hasattr(result, "__await__"):
-            result = await result
+            # ⚠️ Bounded wait: the fail-open contract promises we degrade to
+            # "complete" on a *hang* as well as on an error. A bare `await`
+            # would block the ASR turn indefinitely if the endpoint stalls.
+            result = await asyncio.wait_for(result, timeout=_JUDGE_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001 — must never break the turn
         try:
             conn.logger.bind(tag=__name__).warning(
