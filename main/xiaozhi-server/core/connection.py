@@ -1612,6 +1612,39 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.logger.bind(tag=TAG).debug(f"清除服务端讲话状态")
 
+    def _send_tts_error(self, reason: str) -> None:
+        """Emit a `tts error` signal to the client when speech generation fails.
+
+        Called from the TTS worker thread (`TTSProviderBase._emit_tts_error`), so
+        the actual websocket send has to be scheduled onto the connection's event
+        loop — `asyncio.run_coroutine_threadsafe` is the thread-safe bridge.
+
+        ⚠️ Deliberately NOT `tts stop`. The client treats `stop` as
+        END-OF-REPLY and commits the turn; using it on the failure path made the
+        client commit early and discard the remaining reply text (the "text is
+        gone" regression — see v0.9.15). `error` is a state the healthy path
+        never emits, so it cannot corrupt the commit path.
+        """
+        message = {
+            "type": "tts",
+            "state": "error",
+            "text": textUtils.check_emoji(reason),
+            "session_id": self.session_id,
+        }
+        try:
+            loop = getattr(self, "loop", None)
+            if loop is not None and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self.websocket.send(json.dumps(message)), loop
+                )
+            else:
+                self.logger.bind(tag=TAG).warning(
+                    f"TTS error signal dropped (no running loop): {reason}"
+                )
+        except Exception as e:
+            # A notification failure must never take down the TTS thread.
+            self.logger.bind(tag=TAG).warning(f"failed to send TTS error signal: {e}")
+
     async def close(self, ws=None):
         """资源清理方法"""
         try:

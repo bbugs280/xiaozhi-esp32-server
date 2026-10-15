@@ -163,6 +163,8 @@ class TTSProviderBase(ABC):
                 logger.bind(tag=TAG).error(
                     f"语音生成失败: {original_text}，请检查网络或服务是否正常"
                 )
+                # 没有终止信号的话，客户端会永远卡在转圈。
+                self._emit_tts_error("语音生成失败，请检查网络或服务是否正常")
             return None
         else:
             tmp_file = self.generate_filename()
@@ -263,6 +265,30 @@ class TTSProviderBase(ABC):
     @abstractmethod
     async def text_to_speak(self, text, output_file):
         pass
+
+    def _emit_tts_error(self, reason: str) -> None:
+        """Tell the client this turn's speech generation failed.
+
+        Only a server.log warning is not enough — the client cannot see it. It
+        waits for a terminal signal and, getting none, spins forever
+        (the 2026-10-15 original bug).
+
+        ⚠️ Deliberately NOT `tts stop`. The client reads `stop` as
+        END-OF-REPLY and commits the turn; a per-sentence failure `stop` makes it
+        commit early and discard the remaining reply text (the "text is gone"
+        regression introduced by the reverted fix in v0.9.15). `error` is a
+        state the healthy path never emits, so it cannot corrupt that path.
+
+        Best-effort: a failure to notify must never raise out of the TTS thread.
+        """
+        try:
+            send = getattr(self.conn, "_send_tts_error", None)
+            if callable(send):
+                send(reason)
+                return
+            logger.bind(tag=TAG).warning(f"TTS status error (no notifier wired): {reason}")
+        except Exception as e:  # never raise from the notification path
+            logger.bind(tag=TAG).warning(f"failed to emit TTS error signal: {e}")
 
     def audio_to_pcm_data_stream(
         self, audio_file_path, callback: Callable[[Any], Any] = None
