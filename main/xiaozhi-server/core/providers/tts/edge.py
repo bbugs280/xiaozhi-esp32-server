@@ -97,12 +97,20 @@ class TTSProvider(TTSProviderBase):
     async def text_to_speak(self, text, output_file):
         try:
             voice = self._resolve_voice(text)
+            # Bound the per-attempt network waits. Without these, edge_tts uses its
+            # library defaults (connect 10s / receive 60s) — a hung upstream then
+            # blocks 60s PER ATTEMPT, which no retry policy can recover from and
+            # which shows to the user as a dead spinner. `tts_timeout` is validated
+            # positive-and-finite in the base class, so it is always a usable bound.
+            timeout_s = max(1, int(float(self.tts_timeout)))
             communicate = edge_tts.Communicate(
                 text,
                 voice=voice,
                 rate=self.edge_rate,
                 volume=self.edge_volume,
                 pitch=self.edge_pitch,
+                connect_timeout=timeout_s,
+                receive_timeout=timeout_s,
             )
             if output_file:
                 # 确保目录存在并创建空文件
