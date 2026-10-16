@@ -181,6 +181,19 @@ class ConnectionHandler:
         # 为每个连接单独管理声纹识别
         self.voiceprint_provider = None
 
+        # ⚠️ Speaker GATE (2026-10-16): unlike the label-only voiceprint path
+        # above, this DECIDES whether a turn may open. Reads its own config block
+        # so it can be enabled/disabled independently of the legacy path.
+        # Fails open on any error — see core/utils/speaker_gate.py.
+        _sg_cfg = self.config.get("speaker_gate", {}) or {}
+        self.speaker_gate_enabled = bool(_sg_cfg.get("enabled", False))
+        self.speaker_gate_speaker_dir = os.path.expanduser(
+            _sg_cfg.get("speaker_dir", "~/.cache/ai-where/speakers")
+        )
+        self.speaker_gate_threshold = float(_sg_cfg.get("threshold", 0.42))
+        self.speaker_gate_margin = float(_sg_cfg.get("margin", 0.05))
+        self.speaker_gate_min_audio_ms = int(_sg_cfg.get("min_audio_ms", 1000))
+
         # vad相关变量
         self.client_audio_buffer = bytearray()
         self.client_have_voice = False

@@ -215,6 +215,62 @@ class ASRProviderBase(ABC):
                 # `speaker_name` is "" on voiceprint failure and may be an
                 # exception object on some adapters — never let it leak through.
                 safe_speaker = speaker_name if isinstance(speaker_name, str) else None
+
+                # ⚠️ SPEAKER GATE (2026-10-16): only Vincent's voice may open a
+                # turn. Everything above this line computed a speaker LABEL but
+                # never acted on it, so an MTR/TV announcement still became a
+                # turn (tagged 未识别 and answered anyway). A label filters
+                # nothing; the check must SHORT-CIRCUIT before dispatch.
+                #
+                # Fails OPEN by design (see core/utils/speaker_gate.py): if the
+                # model is unavailable, no prints exist, or the audio is too
+                # short to judge, the turn proceeds. Locking Vincent out of his
+                # own assistant is worse than occasionally admitting noise.
+                if getattr(conn, "speaker_gate_enabled", False):
+                    try:
+                        from core.utils import speaker_gate as _sg  # noqa: PLC0415
+
+                        # ⚠️ embed_pcm is SYNCHRONOUS and CPU-bound (~7ms per
+                        # second of audio; ~290ms for a 42s utterance). Calling
+                        # it bare from this async function BLOCKS THE EVENT LOOP
+                        # and stalls every other connection (build-tester
+                        # measured a 5ms heartbeat delayed by 297ms). Run it in
+                        # a worker thread so the loop keeps ticking.
+                        _emb = await asyncio.to_thread(
+                            _sg.embed_pcm, combined_pcm_data
+                        )
+                        # 16-bit mono PCM: bytes / 2 = samples; samples / rate = secs.
+                        _sr = int(getattr(conn, "sample_rate", 16000) or 16000)
+                        _audio_ms = int(len(combined_pcm_data) / 2 / _sr * 1000)
+                        # Reading the print dir is small file I/O — also off-loop
+                        # for consistency, and it is cached by the OS.
+                        _enrolled = await asyncio.to_thread(
+                            _sg.load_voiceprints,
+                            getattr(conn, "speaker_gate_speaker_dir", ""),
+                        )
+                        _verdict = _sg.evaluate(
+                            _emb,
+                            _enrolled,
+                            threshold=getattr(conn, "speaker_gate_threshold", 0.42),
+                            margin=getattr(conn, "speaker_gate_margin", 0.05),
+                            audio_ms=_audio_ms,
+                            min_audio_ms=getattr(conn, "speaker_gate_min_audio_ms", 1000),
+                        )
+                        if not _verdict.admitted:
+                            logger.bind(tag=TAG).info(
+                                f"声纹门控拒绝该轮对话: {_verdict.reason} | "
+                                f"文本={content_for_length_check!r}"
+                            )
+                            return
+                        logger.bind(tag=TAG).debug(
+                            f"声纹门控通过: {_verdict.reason}"
+                        )
+                    except Exception as _gate_err:
+                        # Never let the gate itself break the pipeline.
+                        logger.bind(tag=TAG).warning(
+                            f"声纹门控异常，放行该轮: {_gate_err}"
+                        )
+
                 candidate = self._wrap_content(raw_text, safe_speaker)
                 # 使用自定义模块进行上报
                 await startToChat(conn, candidate)
