@@ -197,3 +197,11 @@ uploadfile
 main/digital-human/wakeword_runtime/models
 main/digital-human/wakeword_runtime/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01
 sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+
+# Allow ONLY the scrubbed example config into version control (no secrets).
+# Git cannot re-include a file whose parent dir is excluded, so the dir itself
+# must be un-excluded, then its contents re-excluded, then the example allowed.
+# The real data/.config.yaml holds a live api_key and MUST stay ignored.
+!main/xiaozhi-server/data/
+main/xiaozhi-server/data/*
+!main/xiaozhi-server/data/.config.example.yaml

@@ -1,0 +1,80 @@
+#
+# ai-where server override — LIVE (do not commit)
+#
+
+server:
+  ip: 0.0.0.0
+  port: 8000
+  websocket: ws://192.168.86.20:8000/xiaozhi/v1/
+
+selected_module:
+  VAD: SileroVAD
+  ASR: SherpaASR
+  LLM: HermesSatellite
+  TTS: EdgeTTS
+  Memory: mem_local_short
+  Intent: nointent
+
+ASR:
+  SherpaASR:
+    type: sherpa_onnx_local
+    model_dir: models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17
+    output_dir: tmp/
+    model_type: sense_voice
+
+LLM:
+  HermesSatellite:
+    type: openai
+    model_name: hermes-agent
+    url: http://127.0.0.1:8650/v1
+    api_key: YOUR_API_KEY_HERE
+    max_tokens: 80
+    temperature: 0.3
+
+TTS:
+  EdgeTTS:
+    type: edge
+    # Per-reply-language voice: English replies use an English voice so digits/
+    # loanwords read naturally instead of being mangled by the Cantonese voice.
+    voice:
+      yue: zh-HK-WanLungNeural
+      en: en-HK-SamNeural
+    output_dir: tmp/
+
+# Cross-session memory: mem_local_short persists a per-device summary to
+# data/.memory.yaml (keyed by role_id = device-id). The summarizer reuses the
+# HermesSatellite LLM (the same :8650 backend as replies) — no extra LLM or
+# API key. Enables "the assistant remembers Vincent across app relaunches".
+Memory:
+  mem_local_short:
+    type: mem_local_short
+    llm: HermesSatellite
+
+# ── Voiceprint / speaker ID: DISABLED ──────────────────────────────────────
+# Removed 2026-10-16 (v0.9.18). The block was `type: local_ecapa`, which made
+# every connection import `core.utils.local_ecapa_voiceprint` — a module that
+# does not exist in this repo (only a stale .pyc from 2026-09-07 survives; the
+# source was never committed). Result: `声纹识别初始化失败: No module named
+# 'core.utils.local_ecapa_voiceprint'` on every connection.
+#
+# It was doubly dead: even when the module existed it only attached a
+# `speaker` LABEL — it never gated a turn, so it could not reject noise.
+#
+# The real enrolled voiceprint (`~/.cache/ai-where/speakers/vincent.npy`,
+# 192-dim ECAPA, written by the Butler `ecapa_enroll.py` CLI) is unaffected by
+# this config and remains on disk. A working speaker GATE, if wanted, must sit
+# before `startToChat` and read that path — see docs/changes/2026-10-16.md.
+# Re-enabling: restore the block AND ship `local_ecapa_voiceprint.py`.
+
+prompt: |
+  你是 Vincent 的私人語音助手（跑在「AI Where」App 內）。
+
+  【回答語言 = 用戶提問的語言，這是最優先的硬性規則】
+  先看用戶這句話用什麼語言寫的，然後用完全相同的語言回答：
+  - 英文提問 → 英文回答（example: "How's the weather?" → "It's warm and sunny."）
+  - 粵語/中文提問 → 粵語/中文回答（example: "天氣點？" → "今日好天。")
+  - 混語或不確定 → 跟用戶句子裡主要的語言。
+
+  中文一律用繁體字（繁體/zh-Hant），不要簡體。
+  絕對不要轉換語言：英文問題永遠不能用粵語/中文答，中文問題永遠不能用英文答。
+  一句話，簡短自然，不要反問，不要列舉。
