@@ -1,6 +1,7 @@
 import os
 import re
 import math
+import time
 import uuid
 import queue
 import asyncio
@@ -29,6 +30,39 @@ from core.providers.tts.dto.dto import (
 
 TAG = __name__
 logger = setup_logging()
+
+_MAX_TTS_RETRIES = 2
+"""Attempts per sentence before giving up.
+
+## Why this was cut from 5, and why there is now a delay
+
+Measured in production 2026-10-16 12:03:36-12:04:00: Edge TTS returned
+`403 Invalid response status` and the old loop retried **5 times back-to-back
+with no delay** — all five failures landed in the SAME second:
+
+    12:04:00  语音生成失败1次 ... 403
+    12:04:00  语音生成失败2次 ... 403
+    ...
+    12:04:00  ERROR 语音生成失败
+
+A `403` is a server verdict, not a race. An immediate identical retry cannot
+succeed — it can only spend the user's patience. The loop had a ~0% success
+rate for the failure mode it existed for, while costing ~24s of silence before
+the client heard anything. Same defect class as the completeness judge removed
+in v0.9.19: a mechanism whose failure mode is pure added delay.
+
+With a backoff, a retry is a genuinely DIFFERENT attempt (the upstream may have
+recovered, a network blip may have passed), so a small number has real value.
+"""
+
+_TTS_RETRY_BACKOFF_S = 0.5
+"""Pause between attempts.
+
+⚠️ Must stay well under a user's patience threshold — the client shows a
+spinner for this whole window with no audio. Worst case with the values above
+is ~0.5s of retry delay (one backoff between two attempts), not the 24s
+observed in production.
+"""
 
 
 class TTSProviderBase(ABC):
@@ -130,9 +164,10 @@ class TTSProviderBase(ABC):
         # 使用正则一次性替换，避免重复遍历和部分匹配问题
         if self._correct_words_pattern:
             text = self._correct_words_pattern.sub(lambda m: self.correct_words[m.group(0)], text)
-        max_repeat_time = 5
+        max_repeat_time = _MAX_TTS_RETRIES
         if self.delete_audio_file:
             # 需要删除文件的直接转为音频数据
+            attempt = 0
             while max_repeat_time > 0:
                 try:
                     audio_bytes = asyncio.run(self.text_to_speak(text, None))
@@ -150,14 +185,22 @@ class TTSProviderBase(ABC):
                         break
                     else:
                         max_repeat_time -= 1
+                        attempt += 1
                 except Exception as e:
+                    attempt += 1
                     logger.bind(tag=TAG).warning(
-                        f"语音生成失败{5 - max_repeat_time + 1}次: {original_text}，错误: {e}"
+                        f"语音生成失败{attempt}次: {original_text}，错误: {e}"
                     )
                     max_repeat_time -= 1
+                # ⚠️ Back off BEFORE the next attempt. Retrying instantly against
+                # a 403 is guaranteed to fail identically and only adds silence
+                # (see `_MAX_TTS_RETRIES`). A pause makes the retry a genuinely
+                # different attempt — the upstream may have recovered.
+                if max_repeat_time > 0:
+                    time.sleep(_TTS_RETRY_BACKOFF_S)
             if max_repeat_time > 0:
                 logger.bind(tag=TAG).info(
-                    f"语音生成成功: {original_text}，重试{5 - max_repeat_time}次"
+                    f"语音生成成功: {original_text}，重试{attempt - 1}次"
                 )
             else:
                 logger.bind(tag=TAG).error(
@@ -169,26 +212,38 @@ class TTSProviderBase(ABC):
         else:
             tmp_file = self.generate_filename()
             try:
+                attempt = 0
                 while not os.path.exists(tmp_file) and max_repeat_time > 0:
                     try:
                         asyncio.run(self.text_to_speak(text, tmp_file))
                     except Exception as e:
+                        attempt += 1
                         logger.bind(tag=TAG).warning(
-                            f"语音生成失败{5 - max_repeat_time + 1}次: {original_text}，错误: {e}"
+                            f"语音生成失败{attempt}次: {original_text}，错误: {e}"
                         )
                         # 未执行成功，删除文件
                         if os.path.exists(tmp_file):
                             os.remove(tmp_file)
                         max_repeat_time -= 1
+                        # ⚠️ Back off before retrying — see `_MAX_TTS_RETRIES`.
+                        if max_repeat_time > 0:
+                            time.sleep(_TTS_RETRY_BACKOFF_S)
 
                 if max_repeat_time > 0:
                     logger.bind(tag=TAG).info(
-                        f"语音生成成功: {original_text}:{tmp_file}，重试{5 - max_repeat_time}次"
+                        f"语音生成成功: {original_text}:{tmp_file}，重试{attempt - 1}次"
                     )
                 else:
                     logger.bind(tag=TAG).error(
                         f"语音生成失败: {original_text}，请检查网络或服务是否正常"
                     )
+                    # ⚠️ Without a terminal signal the client waits forever.
+                    # This emit was MISSING on this branch (found 2026-10-16) —
+                    # the v0.9.16 fix only covered the delete_audio_file branch,
+                    # so a failure here silently reinstated the spinner-forever
+                    # bug. Both exhaustion sites must notify.
+                    self._emit_tts_error("语音生成失败，请检查网络或服务是否正常")
+                    return None
                 self.tts_audio_queue.put((SentenceType.FIRST, None, original_text, getattr(self, 'current_sentence_id', None)))
                 self._process_audio_file_stream(tmp_file, callback=opus_handler)
             except Exception as e:
