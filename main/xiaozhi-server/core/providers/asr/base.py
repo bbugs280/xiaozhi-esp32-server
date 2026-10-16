@@ -17,7 +17,6 @@ from core.providers.asr.dto.dto import InterfaceType
 from core.handle.receiveAudioHandle import startToChat
 from core.handle.reportHandle import enqueue_asr_report
 from core.utils.util import remove_punctuation_and_length
-from core.utils.utterance_completeness import is_utterance_complete
 from core.handle.receiveAudioHandle import handleAudioMessage
 from typing import Optional, Tuple, List, NamedTuple, TYPE_CHECKING
 
@@ -189,50 +188,34 @@ class ASRProviderBase(ABC):
                 audio_snapshot = asr_audio_task.copy()
                 enqueue_asr_report(conn, enhanced_text, audio_snapshot)
 
-                # ── Utterance completeness gate ────────────────────────────
-                # The VAD closes a turn on *silence*, but a thinking pause is
-                # physically identical to finishing a sentence. Upstream the
-                # LLM was therefore fired on every VAD boundary, answering
-                # half-sentences — the "breaks my questions into batches"
-                # symptom (server.log 2026-10-11 11:18-11:20: one thought ->
-                # three `识别文本` -> three full answers).
+                # Answer immediately. The LLM completeness judge that used to
+                # sit here was REMOVED 2026-10-16 (v0.9.19). Rationale + the
+                # production measurements live in the OUTER repo:
+                #   ~/Projects/ai-where/docs/changes/2026-10-16-c.md
+                # (this server fork has no docs/ dir of its own).
                 #
-                # Hold an incomplete fragment and merge it with the next one,
-                # so the LLM sees the finished thought ONCE. Fail-open: any
-                # judge failure resolves to complete, i.e. today's behaviour.
+                #   • 768 of 772 hold events were test fixtures, not real
+                #     speech — it almost never saw Vincent talking.
+                #   • On real speech its verdicts were wrong: `可唔可以啊？`
+                #     and `電下講落去。` are COMPLETE utterances it wrongly
+                #     held, each costing seconds of silence in which the user
+                #     believed they were not heard.
+                #   • Its one consequential success (`天氣啊。`, held ~3s) made
+                #     the user repeat themselves, and the repeat got the turn
+                #     DROPPED (`client_abort set during intent routing`).
+                #   • Tier 1 never fired once (0 events) — every utterance
+                #     paid a network round-trip.
                 #
-                # ⚠️ Merge RAW text, re-wrap once. `enhanced_text` is the
-                # voiceprint JSON form when voiceprint is active (it is, in
-                # prod: local_ecapa), so concatenating two wrapped payloads
-                # produces `{...}{...}` — invalid JSON that leaks literal
-                # braces into the LLM prompt, the TTS and the transcript.
+                # The merged-fragment case it was built for appears only in
+                # test fixtures, never in real speech. Deleting it removes the
+                # tier-2 latency tax and the wrongly-held-utterance class.
                 raw_text = content_for_length_check or self._unwrap_content(
                     enhanced_text
                 )
-                pending_raw = getattr(conn, "_pending_utterance", None)
-                merged_raw = f"{pending_raw}{raw_text}" if pending_raw else raw_text
-
                 # `speaker_name` is "" on voiceprint failure and may be an
                 # exception object on some adapters — never let it leak through.
                 safe_speaker = speaker_name if isinstance(speaker_name, str) else None
-
-                if not await is_utterance_complete(conn, raw_text):
-                    conn._pending_utterance = merged_raw
-                    # Remember WHO said it, so a later flush (listen stop /
-                    # abort) can re-wrap the merged text in the same shape a
-                    # normal turn carries. Without this the flushed turn loses
-                    # its speaker attribution.
-                    if safe_speaker and safe_speaker.strip():
-                        conn._pending_utterance_speaker = safe_speaker
-                    logger.bind(tag=TAG).info(
-                        f"utterance incomplete -> holding: {raw_text}"
-                    )
-                    return
-
-                # Complete: answer the merged thought, and clear the hold.
-                conn._pending_utterance = None
-                conn._pending_utterance_speaker = None
-                candidate = self._wrap_content(merged_raw, safe_speaker)
+                candidate = self._wrap_content(raw_text, safe_speaker)
                 # 使用自定义模块进行上报
                 await startToChat(conn, candidate)
         except Exception as e:

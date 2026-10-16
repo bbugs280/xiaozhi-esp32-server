@@ -53,32 +53,6 @@ class ListenTextMessageHandler(TextMessageHandler):
 
             conn.client_voice_stop = True
 
-            # ⚠️ `listen stop` is FINAL — no further audio will arrive, so every
-            # fragment held by the time this handler returns must be answered.
-            #
-            # Two things fight here:
-            #   • a hold carried in from an EARLIER fragment, which
-            #     `reset_audio_states()` below clears (so it must be saved
-            #     BEFORE that reset, or it vanishes);
-            #   • the gate's job of MERGING that earlier fragment with the
-            #     terminal one arriving now, so one thought yields ONE answer.
-            #
-            # Flushing the earlier fragment here would satisfy the first and
-            # defeat the second — it pops A out of the gate, `handle_voice_stop`
-            # never sees it, and A and B are answered as two turns. That is the
-            # original "breaks my questions into batches" symptom rebuilt inside
-            # the fix.
-            #
-            # So: SAVE A across the reset, RESTORE it, let the ASR call merge
-            # A+B, then flush once at the end. Single answer, everything
-            # preserved.
-            # ⚠️ Read the speaker BEFORE taking the text: `take_pending_utterance()`
-            # clears BOTH (they are one unit), so reading it afterwards always
-            # yields None and silently drops attribution.
-            saved_speaker = conn.take_pending_utterance_speaker()
-            saved_raw = conn.take_pending_utterance()
-            asr_ran = False
-
             if conn.asr.interface_type == InterfaceType.STREAM:
                 # 流式模式下，发送结束请求
                 asyncio.create_task(conn.asr._send_stop_request())
@@ -88,40 +62,8 @@ class ListenTextMessageHandler(TextMessageHandler):
                     asr_audio_task = conn.asr_audio.copy()
                     conn.reset_audio_states()
 
-                    # ⚠️ Restore A HERE — after the reset (which cleared it) and
-                    # BEFORE `handle_voice_stop()`. The gate reads
-                    # `_pending_utterance` to merge A with the terminal fragment
-                    # B; restoring after that call is too late, because by then
-                    # the gate has already held B alone and A is stranded.
-                    if saved_raw:
-                        conn._pending_utterance = saved_raw
-                        conn._pending_utterance_speaker = saved_speaker
-
                     if len(asr_audio_task) > 0:
-                        asr_ran = True
-                        await conn.asr.handle_voice_stop(conn, asr_audio_task)
-
-            # If `handle_voice_stop` ran, it consumed A into its own decision
-            # (merged-and-answered, or merged-and-re-held). Anything still held
-            # is answered by the single flush below. When it did NOT run —
-            # the stream branch, or no audio — A is still unanswered and must
-            # survive to that flush.
-            if saved_raw and not asr_ran and conn._pending_utterance is None:
-                conn._pending_utterance = saved_raw
-                conn._pending_utterance_speaker = saved_speaker
-
-            # ── Answer whatever the gate is holding ────────────────────────
-            # A fragment is only held because it looked incomplete; with the
-            # user done talking, that text is all we will ever get. The payload
-            # from `flush_pending_utterance()` is already re-wrapped (voiceprint
-            # JSON when a speaker was identified) so it reaches the LLM in the
-            # same shape as a normal turn.
-            held_payload = conn.flush_pending_utterance()
-            if held_payload:
-                conn.logger.bind(tag=TAG).info(
-                    f"listen stop -> flushing held fragment: {held_payload}"
-                )
-                await startToChat(conn, held_payload)
+                        await conn.asr.handle_voice_stop(conn, asr_audio_task)  # type: ignore[attr-defined]
         elif msg_json["state"] == "detect":
             conn.client_have_voice = False
             conn.reset_audio_states()
