@@ -586,8 +586,11 @@ class TTSProviderBase(ABC):
 
         if last_punct_pos != -1:
             segment_text_raw = current_text[: last_punct_pos + 1]
+            # Strip markdown BEFORE the punctuation trim: markdown is a display
+            # format and the synthesiser would otherwise speak `**` and `*`
+            # aloud (observed in the log: "语音生成成功: **Week 3 Challenge**").
             segment_text = textUtils.get_string_no_punctuation_or_emoji(
-                segment_text_raw
+                textUtils.strip_markdown_for_speech(segment_text_raw)
             )
             self.processed_chars += len(segment_text_raw)  # 更新已处理字符位置
 
@@ -644,7 +647,9 @@ class TTSProviderBase(ABC):
         full_text = "".join(self.tts_text_buff)
         remaining_text = full_text[self.processed_chars :]
         if remaining_text:
-            segment_text = textUtils.get_string_no_punctuation_or_emoji(remaining_text)
+            segment_text = textUtils.get_string_no_punctuation_or_emoji(
+                textUtils.strip_markdown_for_speech(remaining_text)
+            )
             if segment_text:
                 self.to_tts_stream(segment_text, opus_handler=opus_handler)
                 self.processed_chars += len(full_text)
