@@ -236,9 +236,11 @@ class ASRProviderBase(ABC):
                         # and stalls every other connection (build-tester
                         # measured a 5ms heartbeat delayed by 297ms). Run it in
                         # a worker thread so the loop keeps ticking.
+                        _t0 = time.perf_counter()
                         _emb = await asyncio.to_thread(
                             _sg.embed_pcm, combined_pcm_data
                         )
+                        _embed_ms = int((time.perf_counter() - _t0) * 1000)
                         # 16-bit mono PCM: bytes / 2 = samples; samples / rate = secs.
                         _sr = int(getattr(conn, "sample_rate", 16000) or 16000)
                         _audio_ms = int(len(combined_pcm_data) / 2 / _sr * 1000)
@@ -258,12 +260,22 @@ class ASRProviderBase(ABC):
                         )
                         if not _verdict.admitted:
                             logger.bind(tag=TAG).info(
-                                f"声纹门控拒绝该轮对话: {_verdict.reason} | "
+                                f"声纹门控 REJECT ({_verdict.reason}) | "
+                                f"embed={_embed_ms}ms | "
                                 f"文本={content_for_length_check!r}"
                             )
                             return
-                        logger.bind(tag=TAG).debug(
-                            f"声纹门控通过: {_verdict.reason}"
+                        # ⚠️ INFO, not debug (2026-10-16). This was `.debug()`
+                        # and production runs at INFO, so EVERY admitted turn
+                        # was invisible. The only in-log evidence was the reject
+                        # cluster (0.04-0.11) — no admitted score was ever seen,
+                        # which made "should we raise the 0.42 threshold?" an
+                        # unanswerable question. Logging the score here turns
+                        # threshold tuning from a guess into a measurement.
+                        logger.bind(tag=TAG).info(
+                            f"声纹门控 ADMIT ({_verdict.reason}) | "
+                            f"embed={_embed_ms}ms | "
+                            f"文本={content_for_length_check!r}"
                         )
                     except Exception as _gate_err:
                         # Never let the gate itself break the pipeline.
