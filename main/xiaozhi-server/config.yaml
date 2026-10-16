@@ -607,7 +607,16 @@ VAD:
     threshold: 0.5
     threshold_low: 0.3
     model_dir: models/snakers4_silero-vad
-    min_silence_duration_ms: 800  # 如果说话停顿比较长，可以把这个值设置大一些。200ms 会把句中换气当成说完一句（长句被切成多段），800ms 是正常对话取值
+    # Turn-end silence tolerance. 800ms 是正常對話取值, but it is TOO SHORT for
+    # deliberate-pause drills: the articulation course instructs a 2-second
+    # silence before the first word (Day 16 Part B, "the 2-second silence
+    # drill"). At 800ms the VAD closed the turn ~4x sooner than the exercise
+    # required, so the buffer was submitted mid-sentence and the coach graded a
+    # fragment. Real report 2026-10-16: "it cuts off before I can finish the
+    # first sentence … I was supposed to pause for two seconds."
+    # 3000ms leaves headroom above the 2s drill beat while still ending a turn
+    # on a normal conversational pause (~0.5-1.5s).
+    min_silence_duration_ms: 3000  # 說話停頓較長/刻意停頓練習用；短於此值會把句中停頓當成說完
 
 LLM:
   # 所有openai类型均可以修改超参，以AliLLM为例

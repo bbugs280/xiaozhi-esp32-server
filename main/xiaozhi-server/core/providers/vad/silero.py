@@ -34,6 +34,21 @@ class VADProvider(VADProviderBase):
             int(min_silence_duration_ms) if min_silence_duration_ms else 1000
         )
 
+        # 刻意停頓練習需要較長的靜默容忍值。發音課程要求開口前先靜默 2 秒
+        # (Day 16 Part B), 若閾值低於此, 使用者會在句子中途被切斷, 教練只收到
+        # 殘句。2026-10-16 實際回報: "it cuts off before I can finish the
+        # first sentence … I was supposed to pause for two seconds."
+        # 只警告不中斷啟動 —— 對話助理被鎖死比容忍度高更糟 (same fail-open
+        # principle as speaker_gate). Regression test:
+        #   tests/core/providers/vad/test_vad_silence_tolerance.py
+        if self.silence_threshold_ms <= 2000:
+            logger.bind(tag=TAG).warning(
+                f"min_silence_duration_ms={self.silence_threshold_ms} is <= 2000ms: "
+                f"a deliberate 2-second pause (articulation Day 16 Part B drill) "
+                f"will be treated as end-of-turn and the user will be cut off "
+                f"mid-sentence. Consider 3000."
+            )
+
         self.frame_window_threshold = 3
 
     def _init_connection_state(self, conn):
