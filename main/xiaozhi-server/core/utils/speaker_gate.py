@@ -94,6 +94,42 @@ def get_embedder():
         return _embedder
 
 
+def prewarm_embedder() -> bool:
+    """Drive the lazy embedder init at STARTUP, off the turn path.
+
+    ⚠️ WHY (2026-10-16): get_embedder() is lazy, so the ECAPA model was built
+    on the FIRST CALL to embed_pcm() — which happens inside handle_voice_stop,
+    BEFORE startToChat. The first utterance after every server start therefore
+    paid the full model-load cost inside Vincent's "thinking..." window.
+
+    Measured on his device (2026-10-16 20:21):
+
+        embed=1081ms   <- first turn after restart (model load, on the turn)
+        embed=46ms     <- every turn after
+
+    and directly on the host:
+
+        cold 1st call (model load): 1498ms
+        warm 2nd call:                23ms     <- 65x faster
+
+    launchd KeepAlive restarts the server on every deploy, so this was paid
+    repeatedly across a testing session. Prewarming moves the cost to boot,
+    where nobody is waiting for a reply.
+
+    Returns True if the model is warm, False if it could not be built. NEVER
+    raises: a missing model must degrade to "gate disabled", not stop the
+    server from booting (same fail-open principle as the gate itself).
+    """
+    try:
+        return get_embedder() is not None
+    except Exception:
+        # NOTE: catches Exception, not BaseException — SystemExit /
+        # KeyboardInterrupt still propagate. That matches get_embedder()'s
+        # own handler, and this runs on a daemon thread, so a stray
+        # BaseException cannot escape boot. Kept consistent deliberately.
+        return False
+
+
 def embed_pcm(pcm_bytes: bytes) -> Optional[np.ndarray]:
     """int16 little-endian 16k mono PCM -> 192-dim unit vector, or None."""
     if not pcm_bytes:

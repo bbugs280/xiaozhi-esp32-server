@@ -6,7 +6,7 @@ from config.config_loader import load_config
 from config.settings import check_config_file
 from core.utils.cache.manager import cache_manager, CacheType
 
-SERVER_VERSION = "0.9.24"
+SERVER_VERSION = "0.9.25"
 _logger_initialized = False
 
 

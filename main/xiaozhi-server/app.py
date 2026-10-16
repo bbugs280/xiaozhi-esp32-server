@@ -2,6 +2,7 @@ import sys
 import uuid
 import signal
 import asyncio
+import threading
 from aioconsole import ainput
 from config.settings import load_config
 from config.logger import setup_logging
@@ -60,6 +61,28 @@ async def main():
             auth_key = str(uuid.uuid4().hex)
     
     config["server"]["auth_key"] = auth_key
+
+    # ⚠️ PREWARM the speaker-gate embedder (2026-10-16). get_embedder() is lazy,
+    # so without this the ECAPA model was built on the FIRST TURN — inside the
+    # user's "thinking..." window (measured: first embed=1081ms, every later
+    # embed=46ms; cold load 1498ms vs warm 23ms on the host). launchd KeepAlive
+    # restarts this server on every deploy, so the cost recurred per session.
+    #
+    # Runs in a worker thread so boot is NOT delayed by ~1.5s of model loading,
+    # and NEVER raises (returns False on failure) — a model that cannot load
+    # must degrade to "gate disabled", not stop the server from starting.
+    def _prewarm_speaker_gate():
+        try:
+            from core.utils import speaker_gate as _sg  # noqa: PLC0415
+
+            ok = _sg.prewarm_embedder()
+            logger.bind(tag=TAG).info(
+                f"声纹门控预热: {'完成' if ok else '失败（门控将按放行处理）'}"
+            )
+        except Exception as _e:  # never let prewarm break boot
+            logger.bind(tag=TAG).warning(f"声纹门控预热异常: {_e}")
+
+    threading.Thread(target=_prewarm_speaker_gate, daemon=True).start()
 
     # 添加 stdin 监控任务
     stdin_task = asyncio.create_task(monitor_stdin())
