@@ -51,15 +51,27 @@ class _FakeLogger:
 
 
 class _FakeLLM:
-    """Records calls and returns a scripted verdict."""
+    """Records calls and returns a scripted verdict.
+
+    ⚠️ This double MUST mirror the real adapter interface
+    (`LLMProviderBase.response(session_id, dialogue)`) — not the caller.
+
+    An earlier version of this double took a single `messages` argument,
+    matching a buggy one-argument call site. That made the whole tier-2 suite
+    pass on code that raised `TypeError` against every real adapter, so the
+    judge was silently dead in production while the tests stayed green. A
+    double that mirrors the caller guards nothing; it launders the bug.
+
+    `response` is a generator, matching the real adapters.
+    """
 
     def __init__(self, verdict_json):
         self.verdict_json = verdict_json
         self.calls = []
 
-    def response(self, messages):
-        self.calls.append(messages)
-        return self.verdict_json
+    def response(self, session_id, dialogue):
+        self.calls.append(dialogue)
+        yield self.verdict_json
 
 
 # --------------------------------------------------------------------------
@@ -162,8 +174,9 @@ def test_judge_failure_fails_open():
     behaviour rather than dropping the user's turn silently."""
 
     class _ExplodingLLM:
-        def response(self, messages):
+        def response(self, session_id, dialogue):
             raise RuntimeError("endpoint down")
+            yield  # pragma: no cover — makes this a generator
 
     conn = _StubConn(llm=_ExplodingLLM())
 
@@ -201,8 +214,9 @@ def test_hanging_judge_times_out_and_fails_open():
     import time
 
     class _HangingLLM:
-        async def response(self, messages):
+        async def response(self, session_id, dialogue):
             await asyncio.sleep(3600)  # never returns
+            yield ""  # pragma: no cover — makes this an async generator
 
     conn = _StubConn(llm=_HangingLLM())
 

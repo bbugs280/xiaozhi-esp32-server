@@ -124,19 +124,26 @@ async def judge_completeness_llm(conn, text: str) -> Optional[bool]:
     if llm is None:
         return None
 
-    messages = [
+    dialogue = [
         {"role": "system", "content": _LLM_SYSTEM_PROMPT},
         {"role": "user", "content": text},
     ]
     try:
-        # The project's LLM adapters expose `response(messages, ...)`; the
-        # signature varies by provider, so reach for the narrowest common form.
-        result = llm.response(messages)
-        if hasattr(result, "__await__"):
+        # ⚠️ The adapter interface is `response(session_id, dialogue)` — see
+        # LLMProviderBase. Calling it as `response(messages)` raises
+        # `TypeError: missing 1 required positional argument: 'dialogue'`,
+        # which the handler below swallows as a fail-open. That silently
+        # disabled tier 2 entirely. Argument shape is load-bearing.
+        raw = llm.response("", dialogue)
+        if hasattr(raw, "__await__"):
             # ⚠️ Bounded wait: the fail-open contract promises we degrade to
             # "complete" on a *hang* as well as on an error. A bare `await`
             # would block the ASR turn indefinitely if the endpoint stalls.
-            result = await asyncio.wait_for(result, timeout=_JUDGE_TIMEOUT_S)
+            raw = await asyncio.wait_for(raw, timeout=_JUDGE_TIMEOUT_S)
+        # ⚠️ Adapters return a GENERATOR of text chunks, not a string.
+        # `str(<generator>)` is "<generator object ...>", which parses as
+        # unparseable and fails open — so the verdict must be JOINED.
+        result = await asyncio.to_thread(_consume_llm_result, raw)
     except Exception as exc:  # noqa: BLE001 — must never break the turn
         try:
             conn.logger.bind(tag=__name__).warning(
@@ -146,9 +153,29 @@ async def judge_completeness_llm(conn, text: str) -> Optional[bool]:
             pass
         return None
 
-    if isinstance(result, dict):
-        result = result.get("content") or result.get("text") or ""
-    return _parse_complete(str(result or ""))
+    return _parse_complete(result)
+
+
+def _consume_llm_result(raw) -> str:
+    """Normalise whatever the adapter returned into the judge's reply text.
+
+    Handles the three shapes the adapters actually produce:
+      - a generator/iterable of text chunks (the common case) -> joined
+      - a dict (`{"content": ...}` / `{"text": ...}`)
+      - a plain string
+
+    ⚠️ Iterating the generator is blocking work; callers must run this via
+    `asyncio.to_thread` so a slow stream cannot stall the event loop.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, dict):
+        return str(raw.get("content") or raw.get("text") or "")
+    if isinstance(raw, str):
+        return raw
+    if hasattr(raw, "__iter__") or hasattr(raw, "__next__"):
+        return "".join(str(chunk or "") for chunk in raw)
+    return str(raw)
 
 
 async def is_utterance_complete(conn, text: str) -> bool:
